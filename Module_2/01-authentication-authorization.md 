@@ -1,0 +1,352 @@
+# Authentication and Authorization in APIs with Django
+
+**Authentication** and **authorization** are two key concepts in API security. Authentication consists of **verifying the identity** of who makes the request (who is the user?). For example, it verifies that the user is who they claim to be, typically by validating username/password or a token. On the other hand, authorization occurs *after* authentication and determines **what that user can do**; that is, which resources or actions are allowed for them. In summary, **authentication = knowing who enters**; **authorization = defining what they can access**.
+
+In daily API practice, authentication and authorization work together: first, the user's identity is **identified** and verified, then **permissions are granted or denied** according to their privileges. Although they are often confused, they differ in that authentication validates credentials (e.g., password, token), while authorization applies access rules (roles, permissions, scopes, etc.) based on that identity. A comparative table of key differences would be:
+
+| Aspect | Authentication | Authorization |
+|--------|----------------|---------------|
+| **What question does it answer?** | "Who is this user?" | "What can this user do?" |
+| **Process** | Verifies credentials (e.g., username/password, token). | Assigns permissions or denies resources according to the user's role. |
+| **When it occurs** | Always first (before granting access). | After successful authentication. |
+| **Visible to user** | Yes: typically the user enters credentials. | Usually invisible: the user only sees what's authorized. |
+| **Example** | Enter username/password, receive session token. | Access only the data allowed according to your role. |
+
+## Common Protection Methods in APIs
+
+There are several schemes for implementing authentication in an API. The most commonly used are:
+
+### Basic Authentication (Basic Auth)
+Sends username and password (encoded in Base64) in each HTTP request. It's simple, but should *only* be used over HTTPS, as credentials travel in each request. In Django REST Framework, it's enabled by adding `BasicAuthentication` to the authentication classes (e.g., in `settings.py`):
+
+```python
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.BasicAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    # ...
+}
+```
+
+This way, any protected view will request username and password in each request. In cURL, you would use `curl -u username:password http://yourdomain.com/api/endpoint`. **Advantage**: it's integrated in DRF and easy to use in tests. **Disadvantage**: credentials always travel in clear text (if no SSL) and the user must re-enter them frequently.
+
+### Static Tokens (Token Authentication)
+A unique token (usually random) is generated per user and stored in the database. The client sends it in each request, typically in the header `Authorization: Token <token>`. Django REST Framework includes `TokenAuthentication` through the `rest_framework.authtoken` app. To activate it, in `settings.py` add:
+
+```python
+INSTALLED_APPS = [
+    # ...
+    'rest_framework',
+    'rest_framework.authtoken',
+]
+```
+
+Then run `python manage.py migrate` to create the token table. You can generate a token for a user in code:
+
+```python
+from rest_framework.authtoken.models import Token
+token = Token.objects.create(user=user)
+print(token.key)
+```
+
+And from the client use:
+
+```
+Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b
+```
+
+where `9944b09...` is the obtained token. DRF even offers a built-in view to obtain tokens via POST (`obtain_auth_token`). **Advantage**: separates session credentials from the resource, and is easy to manually invalidate. **Disadvantage**: the token is stored in the database, it's per unique user (unless using external packages like *django-rest-knox* or custom roles) and doesn't include user information. Also, *requires HTTPS in production*.
+
+### JSON Web Tokens (JWT)
+These are tokens based on the JSON Web Token standard (RFC 7519). A JWT contains **encrypted/signed payload** with encoded data (for example, the user id). Being digitally signed, **there's no need to query the database** to verify it. In Django, the [djangorestframework-simplejwt](https://django-rest-framework-simplejwt.readthedocs.io/) package is usually used to manage JWT. The typical installation is:
+
+```bash
+pip install djangorestframework_simplejwt
+```
+
+Then configure DRF to use `JWTAuthentication`:
+
+```python
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        # ...
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+}
+```
+
+Additionally, in `urls.py`, routes are enabled to obtain access and refresh tokens:
+
+```python
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
+urlpatterns = [
+    # ...
+    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+]
+```
+
+When making POST with credentials to `/api/token/`, the server returns a JSON with `access` and `refresh` tokens. The client then includes in each request:
+
+```
+Authorization: Bearer <access_token>
+```
+
+**Advantages** of JWT: they are *stateless* (don't require DB) and can carry useful information inside (expiration, roles, etc.) without additional queries. **Disadvantages**: if someone obtains the signing secret key, they can forge tokens; you have to handle expiration and revocation (using the refresh token or blacklists).
+
+### Session Authentication
+This is Django's traditional method (login with form that creates a session on the server and a cookie for the client). DRF supports it with `SessionAuthentication`, appropriate for web clients on the same domain. Basically, after a **normal Django login** (for example, using `django.contrib.auth.login`), subsequent AJAX requests carry the session cookie and Django authenticates them automatically. *Note:* when using `SessionAuthentication` with DRF, it's necessary to properly include CSRF tokens in POST/PUT/DELETE methods. **Advantage**: complete integration with Django's user system and no manual token needed. **Disadvantage**: less useful for public or mobile APIs (makes sharing credentials difficult), and you have to deal with CSRF.
+
+### OAuth 2.0
+A standard protocol widely used in modern APIs (e.g., Google, Facebook APIs). It operates through various *flows* (authorization code, client credentials, etc.) in which an external application obtains user permissions to act on their behalf. Django can implement an OAuth2 *provider* using libraries like **django-oauth-toolkit**. For example, after installing:
+
+```bash
+pip install django-oauth-toolkit
+```
+
+Add `oauth2_provider` to `INSTALLED_APPS` and configure it in DRF:
+
+```python
+INSTALLED_APPS = [
+    # ...
+    'oauth2_provider',
+]
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+    ]
+}
+```
+
+Then OAuth2 *clients* and *scopes* are defined (see the [official django-oauth-toolkit guide](https://django-oauth-toolkit.readthedocs.io/) for details). **Advantage**: allows very fine control of permissions and is the de facto standard for complex APIs. **Disadvantage**: complex to implement and understand initially. (There are also packages for OAuth1 or social authentication, but the details are beyond this guide).
+
+### Authentication Methods Comparison
+
+| Method | Description | Advantages | Disadvantages |
+|--------|-------------|------------|---------------|
+| **Basic Auth** | Sending username:password in each HTTP request. | Very simple to test (DRF integrated). | *Insecure* without HTTPS; always sends credentials. |
+| **Token (DRF)** | Unique token generated per user (`Token` model). | Decouples credentials from resources; easy manual revocation. | Only 1 token per user (no extras); expiration must be managed. |
+| **JWT** | Signed token with payload (encoded data). | **Stateless** (no DB query); can contain useful user info. | Expiration management; if secret key is leaked, security is compromised. |
+| **Sessions (Cookie)** | Authentication with session cookie after Django login. | Integrated with Django; no need to handle tokens. | Less suitable for external clients; requires CSRF for mutations. |
+| **OAuth2** | Standard protocol with access and authorization tokens through flows. | Control by scopes/roles; ideal for third parties. | Complex to configure and implement correctly. |
+
+## Implementation in Django with Examples
+
+To illustrate, let's see practical examples using Django + Django REST Framework (DRF):
+
+### 1. Initial Configuration
+Create a Django project and install DRF. In `settings.py`:
+
+```bash
+pip install django djangorestframework
+```
+
+Then in `INSTALLED_APPS`:
+
+```python
+INSTALLED_APPS = [
+    # ...
+    'rest_framework',
+]
+```
+
+In `REST_FRAMEWORK` you can define the default authentication methods. For example, to enable Basic and Sessions:
+
+```python
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.BasicAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ]
+}
+```
+
+### 2. Protected View Example
+Suppose we define a REST view that only an authenticated user can see:
+
+```python
+# views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+
+class HelloUser(APIView):
+    permission_classes = [IsAuthenticated]  # Only authenticated users
+    def get(self, request):
+        return Response({'message': f'Hello, {request.user.username}!'})
+```
+
+With this, any request to `HelloUser` will require prior authentication (whether Basic, Token, JWT, etc., depending on the configuration).
+
+### 3. TokenAuthentication Example
+Following the DRF configuration, we add `rest_framework.authtoken` to `INSTALLED_APPS` and migrate the database:
+
+```python
+INSTALLED_APPS = [
+    # ...
+    'rest_framework.authtoken',
+]
+```
+
+```bash
+python manage.py migrate
+```
+
+Then we create a token for a user (for example in Django `shell`):
+
+```python
+from django.contrib.auth.models import User
+from rest_framework.authtoken.models import Token
+
+user = User.objects.create_user('john', password='secret')
+token = Token.objects.create(user=user)
+print(token.key)  # e.g., "ab12cd34ef56..."
+```
+
+Now, using cURL or Postman, we can call the protected view with:
+
+```
+GET /api/hellouser/ HTTP/1.1
+Host: my-api.com
+Authorization: Token ab12cd34ef56...
+```
+
+If the token is valid, we receive the greeting. Otherwise, a `401 Unauthorized`. Remember to use HTTPS in production, as the token travels in headers.
+
+### 4. JWT Authentication Example
+Install Simple JWT and configure it:
+
+```bash
+pip install djangorestframework_simplejwt
+```
+
+In `settings.py`:
+
+```python
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        # ...
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+}
+```
+
+In `urls.py`, add the token obtaining views:
+
+```python
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
+urlpatterns = [
+    # ...
+    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+]
+```
+
+Now a client sends `POST /api/token/` with JSON `{"username": "...", "password": "..."}`. If correct, it receives a JSON with `access` and `refresh` tokens. To access the protected view, include in the header:
+
+```
+Authorization: Bearer <access_token>
+```
+
+When the access token expires, use `/api/token/refresh/` with the `refresh` to get a new one. The entire process follows the JWT standard.
+
+### 5. Session-Based Authentication
+Simply use Django's login view (e.g., `rest_framework.authtoken` or your own form). After logging in, Django creates a session cookie. With `SessionAuthentication` active, subsequent requests (from the same browser) will include that cookie and the user will be authenticated. It's common to combine it with CSRF if using forms or the DRF-browsable API. No additional code examples are needed, as it's Django's default mechanism.
+
+### 6. OAuth2 with django-oauth-toolkit
+To allow third parties (mobile apps, other websites) to obtain access through OAuth2, use [django-oauth-toolkit](https://django-oauth-toolkit.readthedocs.io/). For example, after installing:
+
+```bash
+pip install django-oauth-toolkit
+```
+
+```python
+INSTALLED_APPS = [
+    # ...
+    'oauth2_provider',
+]
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
+    ]
+}
+```
+
+This enables the necessary classes. Then you must run migrations, configure URLs (`oauth2_provider.urls`), and create **Application** (OAuth2 client) in the admin panel. The client application will follow the flow (p.ej. Authorization Code) to obtain an OAuth2 **access token**, which the client will use in `Authorization: Bearer <access_token>`. Due to complexity, it's recommended to follow the [official documentation](https://django-oauth-toolkit.readthedocs.io/) to complete the flow.
+
+## Security Best Practices
+
+When designing and exposing an API, it's advisable to apply general security measures, in addition to authentication/authorization:
+
+### 1. Always Use HTTPS
+All API communication should be encrypted (SSL/TLS). This protects the transmission of credentials and sensitive data. Both BasicAuth, TokenAuth, or OAuth require HTTPS in production.
+
+### 2. Principle of Least Privilege
+Grant the user only the strictly necessary permissions. For example, use OAuth scopes or permissions/roles to limit access to sensitive resources.
+
+### 3. Data Validation
+Never trust client data: always validate and sanitize input (JSON, parameters, etc.) to avoid injections or malicious data. Use schema validation tools if possible.
+
+### 4. Secure Error Handling
+Don't expose internal information in error messages (e.g., tracebacks or database details). Return appropriate HTTP codes (`401` for unauthenticated, `403` for unauthorized, etc.).
+
+### 5. Protection Against Brute Force Attacks
+Implement *rate limiting* by IP or user to avoid credential bruteforcing and basic DoS. Some packages (like `django-ratelimit`) can help.
+
+### 6. Token Rotation and Expirations
+Use short-lived tokens (in JWT, a short expiration time) and refresh mechanisms. Revoke compromised tokens.
+
+### 7. Logging and Auditing
+Keep access logs (who accessed what and when). This helps in auditing and detecting strange patterns.
+
+### 8. Keep Dependencies Updated
+Use current versions of Django, DRF, and auth libraries to fix known vulnerabilities.
+
+In summary, use standard protocols (OAuth 2.0, JWT, etc.), encryption (HTTPS), and rigorous access controls. Additionally, consider using API gateways or web application firewalls (WAF) as an additional layer, and apply validation and traffic limiting.
+
+## Additional Resources
+
+To dive deeper, the following resources and readings are recommended:
+
+### Official Documentation
+- **Django**: [https://docs.djangoproject.com/](https://docs.djangoproject.com/)
+- **Django REST Framework**: [https://www.django-rest-framework.org/](https://www.django-rest-framework.org/)
+
+These are fundamental for understanding and configuring authentication/authorization.
+
+### Tutorials and Blogs
+There are multiple guides in Spanish and English. For example, the *CosasDeDevs* blog explains step-by-step token authentication creation in DRF. Another good resource is *CoffeeBytes* with a guide on JWT in DRF. These articles include practical code examples.
+
+### Third-Party Packages and Documentation
+- Django OAuth Toolkit guide: [https://django-oauth-toolkit.readthedocs.io/](https://django-oauth-toolkit.readthedocs.io/) details how to implement OAuth2
+- Simple JWT documentation: [https://django-rest-framework-simplejwt.readthedocs.io/](https://django-rest-framework-simplejwt.readthedocs.io/) explains advanced JWT parameters
+
+### Books and Courses
+There are updated Django REST courses online (e.g., *Platzi*, *Udemy*) that cover auth in APIs. Also English resources like the book "*Django for APIs*" by William S. Vincent include chapters on authentication/authorization.
+
+## Summary
+
+Understanding these concepts well and practicing with examples in Django will give you a solid foundation for building secure and robust APIs. Always remember to test your authentication methods (for example, with **Postman** or **cURL**) and review security best practices when deploying your application.
+
+## Key Takeaways
+
+- **Authentication** verifies identity, **authorization** controls access
+- Choose the right method: Basic Auth (simple), Tokens (flexible), JWT (stateless), OAuth2 (complex)
+- Always use HTTPS in production
+- Implement proper error handling and validation
+- Follow security best practices
+- Test thoroughly with tools like Postman
+
+## Next Steps
+
+Now that you understand authentication and authorization, you can:
+- Implement different auth methods in your Django APIs
+- Design secure API endpoints
+- Handle user permissions and roles
+- Integrate with third-party authentication providers
+- Build robust, production-ready APIs
+
+
